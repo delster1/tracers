@@ -13,7 +13,7 @@ fn checksum(data : &[u8]) -> u16 {
         i += 2;
     }
     if data.len() % 2 == 1 {
-        sum = sum.wrapping_add(u32::from(data[i] << 8));
+        sum = sum.wrapping_add((u32::from(data[i])) << 8);
     }
     while (sum >> 16) != 0 {
         // this function handles carry over (ensuring the value stays within 16 bits even if the number exceeds the capacity)
@@ -56,28 +56,28 @@ fn main() {
 
     socket.send_to(&packet, &target_sockaddr).unwrap();
 
-    // Create a buffer that can hold 4 bytes (since a u32 is 4 bytes)
-    let mut buf: [MaybeUninit<u8>; 4] = MaybeUninit::uninit_array(); // Array of 4 uninitialized bytes
+    let mut buf: [MaybeUninit<u8>; 4] = unsafe { MaybeUninit::uninit().assume_init() };
 
     // Convert this uninitialized buffer into a mutable slice of bytes
     let buf_bytes: &mut [MaybeUninit<u8>] = &mut buf;
     
 
-    match socket.recv_from(buf_bytes) {
+    match socket.recv_from(unsafe { &mut *(buf_bytes as *mut _ as *mut [MaybeUninit<u8>]) }) {
         Ok((size, sockaddr)) => {
+            // Handle the received data here
             println!("Received {} bytes from {:?}", size, sockaddr);
 
             // SAFETY: We assume `recv_from` has initialized the buffer correctly
             let initialized_buf: [u8; 4] = unsafe { std::mem::transmute(buf) };
 
+            // If you want to interpret the bytes as a `u32`
             let value: u32 = u32::from_be_bytes(initialized_buf);  // From big-endian bytes to u32
             println!("Received u32: {}", value);
-        },
+        }
         Err(err) => {
-            println!("No response: {}", err);
+            println!("Error receiving data: {}", err);
         }
     }
 }
-    println!("Hello, world!");
 
 
