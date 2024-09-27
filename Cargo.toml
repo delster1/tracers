@@ -7,4 +7,4 @@ edition = "2021"
 
 [dependencies]
 byteorder = "1.5.0"
-socket2 = "0.5.7"
+socket2 = { version = "0.5.7", features = ["all"] }

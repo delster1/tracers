@@ -1,5 +1,5 @@
 use socket2::{Domain, Protocol, Socket, Type, SockAddr};
-use std::{mem::MaybeUninit, net::{IpAddr, Ipv4Addr, SocketAddr}};
+use std::{mem::MaybeUninit, net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4}};
 use byteorder::{ByteOrder, NetworkEndian};
 use std::time::{Duration, Instant};
 fn checksum(data : &[u8]) -> u16 {
@@ -24,17 +24,22 @@ fn checksum(data : &[u8]) -> u16 {
 }
 fn main() {
 
-    let icmp_type : u8 = 14;
+    let icmp_type : u8 = 0;
     let icmp_code : u8 = 0;
     let identifier : u16 = 6942;
     let sequence_number : u16 = 1;
-    let target_ip = "192.168.1.100"; 
-    let target_port = 8080; 
-    let target_address = format!("{}:{}", target_ip, target_port);
 
-    let target_socket_addr: SocketAddr = target_address.parse().expect("Invalid target address");
+    // Define the target IP as a string
+    let target_ip_str = "0.0.0.0";
 
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::ICMPV4)).unwrap();
+    // Parse the IP address separately
+    let target_ip: Ipv4Addr = target_ip_str.parse().expect("Invalid IP address");
+
+    // Define the target socket address with port 0 (ports are not used for ICMP)
+    let target_socket_addr = SocketAddrV4::new(target_ip, 1);
+
+
+    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(socket2::Protocol::ICMPV4) ).unwrap();
 
     let ttl: u32 = 1;
 
@@ -54,7 +59,7 @@ fn main() {
 
     socket.set_read_timeout(Some(Duration::from_secs(5)));
 
-    socket.send_to(&packet, &target_sockaddr).unwrap();
+    socket.send_to(&packet, &target_sockaddr).expect("Failed to send ICMP Packet");
 
     let mut buf: [MaybeUninit<u8>; 4] = unsafe { MaybeUninit::uninit().assume_init() };
 
