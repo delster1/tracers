@@ -44,7 +44,7 @@ fn main() {
 
     let socket = Socket::new(Domain::IPV4, Type::RAW, Some(socket2::Protocol::ICMPV4) ).unwrap();
 
-    let ttl: u32 = 3;
+    let ttl: u32 = 1;
 
     let payload = b"custom packet";
 
@@ -81,6 +81,7 @@ fn main() {
             }
             Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                 // WouldBlock means no data yet, retry after a short sleep
+                println!("No response yet, waiting...");
                 sleep(Duration::from_millis(100));
             }
             Err(err) => {
