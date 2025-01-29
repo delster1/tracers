@@ -1,97 +1,130 @@
-use socket2::{Domain, Protocol, Socket, Type, SockAddr};
-use std::{mem::MaybeUninit, net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4}};
+use socket2::{Domain, Protocol, Socket, SockAddr, Type};
+use std::{mem::{uninitialized, MaybeUninit}, net::{Ipv4Addr, SocketAddrV4}};
 use byteorder::{ByteOrder, NetworkEndian};
 use std::time::{Duration, Instant};
-use std::thread::sleep;
 
-
-fn checksum(data : &[u8]) -> u16 {
+fn checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
-
     let mut i = 0;
 
-    while i < data.len() - 1{
-        let word = NetworkEndian::read_u16(&data[i..]);
+    while i < data.len() {
+        let word = if i == data.len() - 1 {
+            u16::from(data[i]) << 8
+        } else {
+            NetworkEndian::read_u16(&data[i..i + 2])
+        };
         sum = sum.wrapping_add(u32::from(word));
         i += 2;
     }
-    if data.len() % 2 == 1 {
-        sum = sum.wrapping_add((u32::from(data[i])) << 8);
-    }
+
     while (sum >> 16) != 0 {
-        // this function handles carry over (ensuring the value stays within 16 bits even if the number exceeds the capacity)
-        sum = (sum & 0xFFFF) + (sum >> 16); // folds the carry ( sum >> 16) back onto the lower 16 bits of sum
+        sum = (sum & 0xFFFF) + (sum >> 16);
     }
 
     !sum as u16
 }
-fn main() {
 
-    let icmp_type : u8 = 0;
-    let icmp_code : u8 = 0;
-    let identifier : u16 = 6942;
-    let sequence_number : u16 = 1;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let identifier = 6942;
+    let target_ip: Ipv4Addr = "8.8.8.8".parse()?;
+    let target_addr = SocketAddrV4::new(target_ip, 0);
+    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))?;
+    
+    socket.set_read_timeout(Some(Duration::from_secs(3)))?;
+    
+    let max_hops = 30;
+    let timeout = Duration::from_secs(1);
 
-    // Define the target IP as a string
-    let target_ip_str = "8.8.8.8";
+    for ttl in 1..=max_hops {
+        socket.set_ttl(ttl)?;
+        let mut sequence_number = ttl as u16;
+        let mut received = false;
 
-    // Parse the IP address separately
-    let target_ip: Ipv4Addr = target_ip_str.parse().expect("Invalid IP address");
+        // Send 3 probes per TTL
+        for _ in 0..3 {
+            let mut packet = vec![8u8, 0, 0, 0,0,0,0, 0, 0]; // ICMP type 8 (echo request), code 0
+            NetworkEndian::write_u16(&mut packet[4..6], identifier);
+            NetworkEndian::write_u16(&mut packet[6..8], sequence_number);
+            packet.extend_from_slice(b"custom packet");
+            
+            let checksum = checksum(&packet);
+            NetworkEndian::write_u16(&mut packet[2..4], checksum);
+            
+            let send_time = Instant::now();
+            socket.send_to(&packet, &SockAddr::from(target_addr))?;
 
-    // Define the target socket address with port 0 (ports are not used for ICMP)
-    let target_socket_addr = SocketAddrV4::new(target_ip, 0);
+            // Receive response
+            let mut buf = [MaybeUninit::<u8>::uninit(); 1024];
+            let start_time = Instant::now();
+            loop {
+                if start_time.elapsed() > timeout {
+                    print!(" *");
+                    break;
+                }
 
+                match socket.recv_from(&mut buf) {
+                    Ok((size, _)) => {
+                        let data = unsafe {
+                            std::slice::from_raw_parts(buf.as_ptr() as *const u8, size)
+                        };
+                        
+                        // Parse IP header
+                        let ip_header_len = ((data[0] & 0x0F) as usize) * 4;
+                        if data.len() < ip_header_len + 8 {
+                            continue;
+                        }
 
-    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(socket2::Protocol::ICMPV4) ).unwrap();
+                        let icmp_type = data[ip_header_len];
+                        let icmp_code = data[ip_header_len + 1];
 
-    let ttl: u32 = 1;
-
-    let payload = b"custom packet";
-
-    let mut packet =         vec![0u8 ; 8 + payload.len()];
-    packet[0] = icmp_type;
-    packet[1] = icmp_code; 
-    // packet[2..4] = // TODO;
-    NetworkEndian::write_u16(&mut packet[4..6], identifier);
-    NetworkEndian::write_u16(&mut packet[6..8], sequence_number);
-    packet[8..].copy_from_slice(payload);
-
-    let checksum_value = checksum(&packet);
-    NetworkEndian::write_u16(&mut packet[2..4], checksum_value);
-    let target_sockaddr = SockAddr::from(target_socket_addr);
-
-    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    socket.set_nonblocking(true).unwrap();
-
-    socket.send_to(&packet, &target_sockaddr).expect("Failed to send ICMP Packet");
-    println!("Sent ICMP Packet!");
-    let mut buf = [MaybeUninit::uninit(); 150];
-    // Convert this uninitialized buffer into a mutable slice of bytes
-    println!("Starting Recieve loop...");
-    loop {
-        match socket.recv_from(&mut buf){
-            Ok((size, sockaddr)) => {
-                // Handle the received data here
-                println!("Received {} bytes from {:?}", size, sockaddr);
-
-                // SAFETY: We assume `recv_from` has initialized the buffer correctly
-                let value: [u8;16] = unsafe { std::mem::transmute::<&[MaybeUninit<u8>], [u8;16]>(&buf) };
-                println!("Received u32: {:?}", value);
-                break;
+                        match icmp_type {
+                            // Time Exceeded
+                            11 => {
+                                let source_ip = Ipv4Addr::new(
+                                    data[12], data[13], data[14], data[15]
+                                );
+                                let rtt = send_time.elapsed().as_millis();
+                                print!(" {}ms", rtt);
+                                received = true;
+                                break;
+                            }
+                            // Echo Reply
+                            0 => {
+                                let received_id = NetworkEndian::read_u16(&data[ip_header_len + 4..]);
+                                let received_seq = NetworkEndian::read_u16(&data[ip_header_len + 6..]);
+                                
+                                if received_id == identifier && received_seq == sequence_number {
+                                    let source_ip = Ipv4Addr::new(
+                                        data[12], data[13], data[14], data[15]
+                                    );
+                                    println!("\nReached target {} in {}ms", source_ip, send_time.elapsed().as_millis());
+                                    return Ok(());
+                                }
+                            }
+                            _ => continue,
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                        print!(" *");
+                        break;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
             }
-            Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                // WouldBlock means no data yet, retry after a short sleep
-                println!("No response yet, waiting...");
-                sleep(Duration::from_millis(100));
-            }
-            Err(err) => {
-                println!("Error receiving data: {}", err);
-                break;
-            }
+            sequence_number += 1;
         }
 
+        if received {
+            println!();
+        } else {
+            println!("  No response");
+        }
 
+        if ttl == max_hops {
+            println!("Maximum hops reached");
+            break;
+        }
     }
+
+    Ok(())
 }
-
-
